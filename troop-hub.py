@@ -1,6 +1,7 @@
 import socket, socketserver
 import time
 import json
+import os.path
 from threading import Thread
 from subprocess import Popen, PIPE, STDOUT
 
@@ -10,15 +11,15 @@ PATH = '.'
 PORT = 57990
 
 try:
-    f = open('conf.txt')
-    for line in f.readlines():
-        if line.startswith('path'):
-            PATH = line.split('=')[-1]
-        elif line.startswith('port'):
-            PORT = int(line.split('=')[-1])
-    f.close()
+    with open('conf.json') as f:
+        data = json.loads(f.read())
+    PATH = data.get('path') or PATH
+    PORT = data.get('port') or PORT
 except FileNotFoundError:
     pass
+
+def get_troop_executable():
+    return os.path.join(PATH, 'run-server.py')
 
 class JSONMessage:
     """ Wrapper for JSON messages sent to the server """
@@ -44,7 +45,6 @@ class JSONMessage:
         return len(str(self))
 
 class HubRequestHandler(socketserver.BaseRequestHandler):
-    path = PATH
     def handle(self):
         """
         self.request = socket
@@ -82,7 +82,7 @@ class HubRequestHandler(socketserver.BaseRequestHandler):
         self.port = self.server.get_next_port()
         self.public_address = (self.server.public_ip,  self.port)
         args = [
-            self.path,
+            get_troop_executable(),
             '--port', str(self.port),
             '--password', data['password']
             ]
@@ -250,6 +250,8 @@ class HubServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 
 if __name__ == "__main__":
+
+    assert os.path.exists(get_troop_executable()), "Could not find 'run-server.py'"
 
     server = HubServer()
     server.run()
