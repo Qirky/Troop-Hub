@@ -1,10 +1,24 @@
 import socket, socketserver
 import time
 import json
-import tempfile
 from threading import Thread
 from subprocess import Popen, PIPE, STDOUT
-from hashlib import md5
+
+# Load conf settings
+
+PATH = '.'
+PORT = 57990
+
+try:
+    f = open('conf.txt')
+    for line in f.readlines():
+        if line.startswith('path'):
+            PATH = line.split('=')[-1]
+        elif line.startswith('port'):
+            PORT = int(line.split('=')[-1])
+    f.close()
+except FileNotFoundError:
+    pass
 
 class JSONMessage:
     """ Wrapper for JSON messages sent to the server """
@@ -30,59 +44,88 @@ class JSONMessage:
         return len(str(self))
 
 class HubRequestHandler(socketserver.BaseRequestHandler):
-    path = "../troop/run-server.py"
+    path = PATH
     def handle(self):
         """
         self.request = socket
         self.server  = HubServer
         self.client_address = (address, port)
         """
+        # Get type of request
+        request = self.recv()
+        if 'type' not in request:
+            return self.error('No request type given', in_validation=True)
+
+        handle = getattr(self, 'handle_' + request['type'].lower())
+        return handle(request)
+
+    def handle_query(self, data):
+        '''
+        Returns the (address, port) tuple for a Troop server with a given name
+        '''
+        if 'name' not in data:
+            return self.error('No instance name given')
+        instance = self.server._clients.get(data['name'])
+        return self.send({'result': getattr(instance, 'public_address', None)})
+
+    def handle_server(self, data):
+        '''
+        Starts a new Troop server on this Hub
+        '''
         # Return error message if too many connected etc
-        data = self.validate_request()
-        if not data:
+        validated = self.validate_request(data)
+        if not validated:
             return
 
         # Set port and password or Troop Server
-        port = self.server.get_next_port()
+        self.name = data['name']
+        self.port = self.server.get_next_port()
+        self.public_address = (self.server.public_ip,  self.port)
         args = [
             self.path,
-            '--port', str(port),
+            '--port', str(self.port),
             '--password', data['password']
             ]
         self.process = Popen(args, stdout=PIPE)
 
         # Add to server and start
-        self.server.add_client(self.client_address, self)
-        self.send({'address': (self.server.public_ip,  port)})
+        self.server.add_client(self)
+        self.send({'address': self.public_address})
         self.println("New session started")
 
         self.alive = True
 
-        data = self.recv()
-        if not self.alive:
-            return
-        if not data:
-            return self.kill()
+        while True:
+            data = self.recv()
+            if not self.alive:
+                return
+            if not data:
+                return self.kill()
 
         return
 
-    def validate_request(self):
+    def validate_request(self, request):
         """ Checks whether to continue handling the request """
+        if 'name' not in request:
+            return self.error("No instance name given", in_validation=True)
+        if 'password' not in request:
+            return self.error("No password set", in_validation=True)
         if len(self.server._clients) >= self.server._max_clients:
             return self.error(
                 "Max number of running Troop instances reached",
                 in_validation=True
             )
-        if self.client_address in self.server:
+        if self.client_address[0] in self.server.address_book():
             return self.error(
                 "A running Troop server has already been started from "
                 "this address",
                 in_validation=True
             )
-        data = self.recv()
-        if 'password' not in data:
-            return self.error("No password set", in_validation=True)
-        return data
+        if request['name'] in self.server.server_names():
+            return self.error(
+                "A running Troop server already exists with this name"
+            )
+        return request
 
     def error(self, message, in_validation=False):
         '''
@@ -95,7 +138,7 @@ class HubRequestHandler(socketserver.BaseRequestHandler):
     def kill(self):
         self.alive = False
         self.process.kill()
-        self.server.remove_client(self.client_address)
+        self.server.remove_client(self.name)
         self.println("Session has finished")
         return 0
 
@@ -126,9 +169,8 @@ class HubRequestHandler(socketserver.BaseRequestHandler):
         return
 
     def println(self, message):
-        print("{} - {} [origin @ {}:{}]".format(
-            self.id,
-            message,
+        print("({}) {} -> {} [origin @ {}:{}]".format(
+            self.id, self.name, message,
             *self.client_address
         ))
 
@@ -140,10 +182,11 @@ class HubRequestHandler(socketserver.BaseRequestHandler):
         return self._id
 
 class HubServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+
     def __init__(self, *args, **kwargs):
-        HOST = kwargs.get('host', "0.0.0.0")
-        PORT = kwargs.get('port', 57990)
-        super().__init__((HOST, PORT), HubRequestHandler)
+        host = kwargs.get('host', "0.0.0.0")
+        port = kwargs.get('port', PORT)
+        super().__init__((host, port), HubRequestHandler)
 
         self._ip_addr, self._port = self.server_address
         self._max_clients = kwargs.get('max_clients', 10)
@@ -186,15 +229,18 @@ class HubServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             next_port += 1
         return
 
-    def __contains__(self, address):
-        return address[0] in (addr[0] for addr in self._clients)
+    def address_book(self):
+        return (addr[0] for addr in self._clients.keys())
 
-    def add_client(self, address, client):
-        self._clients[address] = client
+    def server_names(self):
+        return (server.name for server in self._clients.values())
 
-    def remove_client(self, address):
-        # Check if process needs killing first
-        del self._clients[address]
+    def add_client(self, client):
+        self._clients[client.name] = client
+
+    def remove_client(self, name):
+        # TODO Check if process needs killing first
+        del self._clients[name]
 
     def kill(self):
         """ Cleanly kills all connected clients then exits """

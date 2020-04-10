@@ -1,0 +1,2 @@
+path='../troop/'
+port=57990
