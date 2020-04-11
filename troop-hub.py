@@ -1,9 +1,25 @@
+#!/usr/bin/env python3
+
 import socket, socketserver
 import time
 import json
-import os.path
+import os, os.path
 from threading import Thread
 from subprocess import Popen, PIPE, STDOUT
+
+import sys, logging
+
+# Set up logging
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+logging.basicConfig(
+    filename='server.log',
+    filemode='w',
+    level=logging.INFO,
+    format='%(asctime)s %(message)s'
+)
 
 # Load conf settings
 
@@ -169,7 +185,7 @@ class HubRequestHandler(socketserver.BaseRequestHandler):
         return
 
     def println(self, message):
-        print("({}) {} -> {} [origin @ {}:{}]".format(
+        logger.info("({}) {} -> {} [origin @ {}:{}]".format(
             self.id, self.name, message,
             *self.client_address
         ))
@@ -191,19 +207,31 @@ class HubServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self._ip_addr, self._port = self.server_address
         self._max_clients = kwargs.get('max_clients', 10)
         self._thread = Thread(target=self.serve_forever)
+        self._thread.daemon = True
         self._clients = {}
         self._id = 0 # ID tracker for handlers
 
-    def run(self):
+    def run(self, lockfile=None):
+
         print("Troop Hub running on {}:{}".format(
             self.public_ip,
             self._port
         ))
-        try:
-            self.serve_forever()
-        except KeyboardInterrupt:
-            print("Exiting...")
-            return self.kill()
+        self._thread.start()
+        while True:
+            try:
+                if lockfile and not os.path.exists(lockfile):
+                    with open(lockfile, 'w') as f:
+                        f.write(str(os.getpid()))
+                time.sleep(0.5)
+            except KeyboardInterrupt:
+                print("Exiting...")
+                self.kill()
+                break
+            except Exception as err:
+                print(err)
+                logger.info(str(err))
+        self.server_close()
         return
 
     @property
@@ -239,7 +267,6 @@ class HubServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self._clients[client.name] = client
 
     def remove_client(self, name):
-        # TODO Check if process needs killing first
         del self._clients[name]
 
     def kill(self):
@@ -248,10 +275,88 @@ class HubServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             client.error("Troop Hub Service has been manually terminated")
         return
 
+import daemon
+import signal
+import psutil
+
+class HubDaemon:
+    lockfile = 'daemon.lock'
+    allowed_commands = ['start', 'stop', 'restart']
+    def start(self):
+        # Check if process exists
+        if self.get_pid():
+            sys.exit("Process already running")
+
+        print("Starting Troop Hub Service")
+
+        kwargs = {}
+        kwargs.update(
+            working_directory='.',
+            files_preserve=[
+                logging.root.handlers[0].stream.fileno()
+            ],
+            signal_map={
+                signal.SIGTERM: self.kill,
+                signal.SIGTSTP: self.kill
+            }
+        )
+
+        with daemon.DaemonContext(**kwargs):
+            HubServer().run(lockfile=self.lockfile)
+
+    def stop(self):
+        pid = self.get_pid()
+        if not pid:
+            sys.exit('No running Troop Hub Service')
+        print("Killing Troop Hub - pid: {}".format(pid))
+        os.kill(pid, signal.SIGKILL)
+        return self.kill()
+
+    def kill(self, signum=None, frame=None):
+        os.remove(self.lockfile)
+        sys.exit(0)
+
+    def restart(self):
+        self.stop()
+        self.start()
+
+    def run(self, args):
+        if not len(args):
+            return self.exit()
+        command = args[0].lower()
+        if command in self.allowed_commands:
+            handler = getattr(self, command, None)
+            if handler:
+                return handler()
+        return self.exit()
+
+    def get_pid(self):
+        if os.path.exists(self.lockfile):
+            with open(self.lockfile) as f:
+                pid = int(f.readline().strip())
+                if psutil.pid_exists(pid):
+                    return pid
+        return None
+
+    def exit(self):
+        sys.exit("Usage: python {} [-d] [{}]".format(
+            sys.argv[0], ", ".join(self.allowed_commands)
+        ))
+
 
 if __name__ == "__main__":
 
     assert os.path.exists(get_troop_executable()), "Could not find 'run-server.py'"
 
-    server = HubServer()
-    server.run()
+    if len(sys.argv) == 1:
+
+        HubServer().run()
+
+    elif sys.argv[1] == '-d':
+
+        process = HubDaemon()
+        process.run(sys.argv[2:])
+
+    else:
+
+        HubDaemon().exit()
