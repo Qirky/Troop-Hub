@@ -6,8 +6,15 @@ import json
 import os, os.path
 from threading import Thread
 from subprocess import Popen, PIPE, STDOUT
-
 import sys, logging
+
+try:
+    # Not needed for running HubServer
+    import daemon
+    import signal
+    import psutil
+except:
+    pass
 
 # Set up logging
 
@@ -289,13 +296,10 @@ class HubServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             client.error("Troop Hub Service has been manually terminated")
         return
 
-import daemon
-import signal
-import psutil
-
 class HubDaemon:
     lockfile = 'daemon.lock'
     allowed_commands = ['start', 'stop', 'restart', 'status']
+
     def start(self):
         # Check if process exists
         if self.get_pid():
@@ -345,6 +349,9 @@ class HubDaemon:
         self.start()
 
     def run(self, args):
+        # Re-run imports to confirm installation
+        import daemon, signal, psutil
+
         if not len(args):
             return self.exit()
         command = args[0].lower()
@@ -377,6 +384,10 @@ if __name__ == "__main__":
         HubServer().run()
 
     elif sys.argv[1] == '-d':
+
+        import daemon
+        import signal
+        import psutil
 
         process = HubDaemon()
         process.run(sys.argv[2:])
