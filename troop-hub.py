@@ -185,10 +185,13 @@ class HubRequestHandler(socketserver.BaseRequestHandler):
         return
 
     def println(self, message):
-        logger.info("({}) {} -> {} [origin @ {}:{}]".format(
+        output = "({}) {} -> {} [origin @ {}:{}]".format(
             self.id, self.name, message,
             *self.client_address
-        ))
+        )
+        if not self.server._daemon_mode:
+            print(output)
+        logger.info(output)
 
     @property
     def id(self):
@@ -204,6 +207,14 @@ class HubServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         port = kwargs.get('port', PORT)
         super().__init__((host, port), HubRequestHandler)
 
+        self._daemon_mode = kwargs.get('daemon', False)
+        self._lockfile = kwargs.get('lockfile')
+
+        if self._daemon_mode and not self._lockfile:
+            raise ValueError(
+                "'lockfile' argument must be provided when 'daemon' mode is set."
+            )
+
         self._ip_addr, self._port = self.server_address
         self._max_clients = kwargs.get('max_clients', 10)
         self._thread = Thread(target=self.serve_forever)
@@ -211,17 +222,19 @@ class HubServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self._clients = {}
         self._id = 0 # ID tracker for handlers
 
-    def run(self, lockfile=None):
+    def run(self):
 
         print("Troop Hub running on {}:{}".format(
             self.public_ip,
             self._port
         ))
+
         self._thread.start()
+
         while True:
             try:
-                if lockfile and not os.path.exists(lockfile):
-                    with open(lockfile, 'w') as f:
+                if self._daemon_mode and not os.path.exists(self._lockfile):
+                    with open(self._lockfile, 'w') as f:
                         f.write(str(os.getpid()))
                 time.sleep(0.5)
             except KeyboardInterrupt:
@@ -231,6 +244,7 @@ class HubServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             except Exception as err:
                 print(err)
                 logger.info(str(err))
+
         self.server_close()
         return
 
@@ -281,7 +295,7 @@ import psutil
 
 class HubDaemon:
     lockfile = 'daemon.lock'
-    allowed_commands = ['start', 'stop', 'restart']
+    allowed_commands = ['start', 'stop', 'restart', 'status']
     def start(self):
         # Check if process exists
         if self.get_pid():
@@ -302,19 +316,29 @@ class HubDaemon:
         )
 
         with daemon.DaemonContext(**kwargs):
-            HubServer().run(lockfile=self.lockfile)
+            HubServer(daemon=True, lockfile=self.lockfile).run()
 
     def stop(self):
         pid = self.get_pid()
         if not pid:
             sys.exit('No running Troop Hub Service')
-        print("Killing Troop Hub - pid: {}".format(pid))
+        print("Killing Troop Hub Service - pid: {}".format(pid))
         os.kill(pid, signal.SIGKILL)
         return self.kill()
 
     def kill(self, signum=None, frame=None):
         os.remove(self.lockfile)
         sys.exit(0)
+
+    def status(self):
+        pid = self.get_pid()
+        if not pid:
+            sys.exit('No running Troop Hub Service')
+        process = psutil.Process(pid)
+        with process.oneshot():
+            print("Troop Hub Service")
+            print("Running Servers: {}".format(process.num_threads() - 2))
+            print("CPU: {}%".format(process.cpu_percent()))
 
     def restart(self):
         self.stop()
