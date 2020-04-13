@@ -21,8 +21,10 @@ except:
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+LOGFILE = 'server.log'
+
 logging.basicConfig(
-    filename='server.log',
+    filename=LOGFILE,
     filemode='w',
     level=logging.INFO,
     format='%(asctime)s %(message)s'
@@ -212,10 +214,13 @@ class HubServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     def __init__(self, *args, **kwargs):
         host = kwargs.get('host', "0.0.0.0")
         port = kwargs.get('port', PORT)
-        super().__init__((host, port), HubRequestHandler)
 
         self._daemon_mode = kwargs.get('daemon', False)
         self._lockfile = kwargs.get('lockfile')
+
+        logger.info('Booting')
+
+        super().__init__((host, port), HubRequestHandler)
 
         if self._daemon_mode and not self._lockfile:
             raise ValueError(
@@ -228,6 +233,7 @@ class HubServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self._thread.daemon = True
         self._clients = {}
         self._id = 0 # ID tracker for handlers
+        self._running = False
 
     def run(self):
 
@@ -236,23 +242,30 @@ class HubServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             self._port
         ))
 
+        # Start thread and write pid to lockfile
         self._thread.start()
+        self._running = True
 
-        while True:
+        while self._running:
             try:
                 if self._daemon_mode and not os.path.exists(self._lockfile):
-                    with open(self._lockfile, 'w') as f:
-                        f.write(str(os.getpid()))
-                time.sleep(0.5)
+                    self.write_to_lockfile()
+                time.sleep(1)
             except KeyboardInterrupt:
                 print("Exiting...")
                 self.kill()
-                break
             except Exception as err:
                 print(err)
                 logger.info(str(err))
 
         self.server_close()
+        return
+
+    def write_to_lockfile(self, pid=None):
+        """ Writes the pid to the lockfile. Defaults to os.getpid() """
+        with open(self._lockfile, 'w') as f:
+            pid = (pid or os.getpid())
+            f.write(str(pid))
         return
 
     @property
@@ -279,7 +292,7 @@ class HubServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         return
 
     def address_book(self):
-        return (addr[0] for addr in self._clients.keys())
+        return (client.client_address[0] for client in self._clients.values())
 
     def server_names(self):
         return (server.name for server in self._clients.values())
@@ -294,11 +307,15 @@ class HubServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         """ Cleanly kills all connected clients then exits """
         for client in list(self._clients.values()):
             client.error("Troop Hub Service has been manually terminated")
+        self._running = False
         return
 
 class HubDaemon:
-    lockfile = 'daemon.lock'
+    lockfile = '.daemon.lock'
     allowed_commands = ['start', 'stop', 'restart', 'status']
+
+    def __init__(self, debug=False):
+        self.debug = debug
 
     def start(self):
         # Check if process exists
@@ -308,6 +325,8 @@ class HubDaemon:
         print("Starting Troop Hub Service")
 
         kwargs = {}
+        if self.debug:
+            kwargs.update(stdout=sys.stdout, stderr=sys.stdout)
         kwargs.update(
             working_directory='.',
             files_preserve=[
@@ -322,13 +341,17 @@ class HubDaemon:
         with daemon.DaemonContext(**kwargs):
             HubServer(daemon=True, lockfile=self.lockfile).run()
 
-    def stop(self):
+    def stop(self, kill=True):
         pid = self.get_pid()
         if not pid:
             sys.exit('No running Troop Hub Service')
         print("Killing Troop Hub Service - pid: {}".format(pid))
         os.kill(pid, signal.SIGKILL)
-        return self.kill()
+        if kill:
+            self.kill()
+        else:
+            os.remove(self.lockfile)
+        return
 
     def kill(self, signum=None, frame=None):
         os.remove(self.lockfile)
@@ -340,12 +363,13 @@ class HubDaemon:
             sys.exit('No running Troop Hub Service')
         process = psutil.Process(pid)
         with process.oneshot():
-            print("Troop Hub Service")
+            print("Troop Hub Service Status")
             print("Running Servers: {}".format(process.num_threads() - 2))
             print("CPU: {}%".format(process.cpu_percent()))
+        return
 
     def restart(self):
-        self.stop()
+        self.stop(kill=False)
         self.start()
 
     def run(self, args):
@@ -389,7 +413,7 @@ if __name__ == "__main__":
         import signal
         import psutil
 
-        process = HubDaemon()
+        process = HubDaemon(debug=True)
         process.run(sys.argv[2:])
 
     else:

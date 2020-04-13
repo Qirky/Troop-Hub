@@ -1,5 +1,2 @@
-docutils==0.16
-lockfile==0.12.2
-pkg-resources==0.0.0
 psutil==5.7.0
 python-daemon-3K==1.5.8
