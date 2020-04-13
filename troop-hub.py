@@ -413,7 +413,7 @@ if __name__ == "__main__":
         import signal
         import psutil
 
-        process = HubDaemon(debug=True)
+        process = HubDaemon()
         process.run(sys.argv[2:])
 
     else:
