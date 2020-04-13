@@ -30,8 +30,14 @@ Now you're running a Troop Hub Service - thank you for taking part! As mentioned
 
 To connect to a custom Troop Hub Service, clients *will* need to know the service's IP address and port and use them to start their servers / clients and this is done via the command line by just adding values to `--hub` name like so:
 
-`python run-server --hub myServer@<custom_hub_port>:port`
+`python run-server --hub myServer@<hub_ip:<hub_port>`
 
 So if I was running the service on 144.144.144.144 and port 1234, I would create a server like this:
 
 `python run-server --hub myServer@144.144.144.144:1234`
+
+### Daemon
+
+To run the hub service as a Daemon you'll need to be using Linux and have installed the Python libraries found in `requirements.txt`. I would suggest [creating a virtual environment](https://docs.python.org/3/library/venv.html) first if you don't want these installed globally. You can install the libraries by running `pip install -r requirements.txt`
+
+Once these libraries are installed you can add the `-d` flag followed by a `start`, `stop`, `restart`,  or `status` command to interact with the daemon e.g. `python troop-hub.py -d start`.
