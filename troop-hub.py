@@ -361,12 +361,15 @@ class HubDaemon:
         pid = self.get_pid()
         if not pid:
             sys.exit('No running Troop Hub Service')
-        process = psutil.Process(pid)
-        with process.oneshot():
-            print("Troop Hub Service Status")
-            print("Running Servers: {}".format(process.num_threads() - 2))
-            print("CPU: {}%".format(process.cpu_percent()))
-        return
+        parent = psutil.Process(pid)
+        output = []
+        output.append("Troop Hub Service")
+        output.append("Running Servers: {}".format(parent.num_threads() - 2))
+        cpu_total = parent.cpu_percent(0.1)
+        for child in parent.children(recursive=True):
+            cpu_total += child.cpu_percent(0.1)
+        output.append("CPU: {}%".format(cpu_total))
+        print("\n".join(output))
 
     def restart(self):
         self.stop(kill=False)
