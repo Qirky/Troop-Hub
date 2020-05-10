@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import socket, socketserver
-import time
+import time, datetime
 import json
 import os, os.path
 from threading import Thread
@@ -18,17 +18,28 @@ except:
 
 # Set up logging
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
 LOGFILE = 'server.log'
 
-logging.basicConfig(
-    filename=LOGFILE,
-    filemode='w',
-    level=logging.INFO,
-    format='%(asctime)s %(message)s'
-)
+class Logger:
+    def __init__(self, filepath):
+        self.filepath = filepath
+        self.enabled = False
+
+    def enable(self):
+        self.enabled = True
+        with open(self.filepath, 'w') as f:
+            f.truncate()
+
+    def info(self, string):
+        if self.enabled:
+            with open(self.filepath, 'a') as f:
+                log = "{} - {}\n".format(
+                    datetime.datetime.utcnow().isoformat(),
+                    string
+                )
+                f.write(log)
+
+logger = Logger(LOGFILE)
 
 # Load conf settings
 
@@ -69,6 +80,7 @@ class JSONMessage:
     def __len__(self):
         return len(str(self))
 
+
 class HubRequestHandler(socketserver.BaseRequestHandler):
     def handle(self):
         """
@@ -92,6 +104,29 @@ class HubRequestHandler(socketserver.BaseRequestHandler):
             return self.error('No instance name given')
         instance = self.server._clients.get(data['name'])
         return self.send({'result': getattr(instance, 'public_address', None)})
+
+    def handle_kill(self, data):
+        '''
+        Used to manually kill a hub by name. Accepts only requests from
+        localhost.
+        '''
+        if 'name' not in data:
+            return self.error('No instance name given', in_validation=True)
+
+        elif self.client_address[0] not in ('127.0.0.1', 'localhost'):
+            return self.error(
+                'External kill request denied', in_validation=True
+            )
+
+        instance = self.server._clients.get(data['name'])
+        if not instance:
+            return self.error(
+                'Hub instance "{}" not found'.format(data['name']),
+                in_validation=True
+            )
+
+        instance.error('Session manually killed by admin.')
+        self.send({'data': 'success'})
 
     def handle_server(self, data):
         '''
@@ -312,52 +347,52 @@ class HubServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 class HubDaemon:
     lockfile = '.daemon.lock'
-    allowed_commands = ['start', 'stop', 'restart', 'status']
+    allowed_commands = ['start', 'stop', 'restart', 'status', 'kill']
 
     def __init__(self, debug=False):
         self.debug = debug
 
-    def start(self):
+    def _kill(self, signum=None, frame=None):
+        ''' Kills the daemon - not a server '''
+        os.remove(self.lockfile)
+        sys.exit(0)
+
+    def start(self, *args):
         # Check if process exists
         if self.get_pid():
             sys.exit("Process already running")
 
         print("Starting Troop Hub Service")
 
+        logger.enable()
+
         kwargs = {}
         if self.debug:
             kwargs.update(stdout=sys.stdout, stderr=sys.stdout)
         kwargs.update(
             working_directory='.',
-            files_preserve=[
-                logging.root.handlers[0].stream.fileno()
-            ],
             signal_map={
-                signal.SIGTERM: self.kill,
-                signal.SIGTSTP: self.kill
+                signal.SIGTERM: self._kill,
+                signal.SIGTSTP: self._kill
             }
         )
 
         with daemon.DaemonContext(**kwargs):
             HubServer(daemon=True, lockfile=self.lockfile).run()
 
-    def stop(self, kill=True):
+    def stop(self, *args, kill=True):
         pid = self.get_pid()
         if not pid:
             sys.exit('No running Troop Hub Service')
         print("Killing Troop Hub Service - pid: {}".format(pid))
         os.kill(pid, signal.SIGKILL)
         if kill:
-            self.kill()
+            self._kill()
         else:
             os.remove(self.lockfile)
         return
 
-    def kill(self, signum=None, frame=None):
-        os.remove(self.lockfile)
-        sys.exit(0)
-
-    def status(self):
+    def status(self, *args):
         pid = self.get_pid()
         if not pid:
             sys.exit('No running Troop Hub Service')
@@ -371,9 +406,32 @@ class HubDaemon:
         output.append("CPU: {}%".format(cpu_total))
         print("\n".join(output))
 
-    def restart(self):
+    def restart(self, *args):
         self.stop(kill=False)
         self.start()
+
+    def kill(self, hubname):
+        ''' Command to kill a hub, not the daemon '''
+        pid = self.get_pid()
+        if not pid:
+            sys.exit('No running Troop Hub Service')
+
+        # Kill via socket
+        s = socket.socket()
+        s.connect(('localhost', PORT))
+        s.send(
+            JSONMessage({
+                'type': 'kill',
+                'name': hubname
+            }).string.encode()
+        )
+        bits = int(s.recv(4).decode())
+        data = json.loads(s.recv(bits).decode())
+        if 'error' in data:
+            print("Error: " + data['error'])
+        else:
+            print("Hub '{}' manually killed.".format(hubname))
+        s.close()
 
     def run(self, args):
         # Re-run imports to confirm installation
@@ -385,7 +443,7 @@ class HubDaemon:
         if command in self.allowed_commands:
             handler = getattr(self, command, None)
             if handler:
-                return handler()
+                return handler(*args[1:])
         return self.exit()
 
     def get_pid(self):
@@ -408,7 +466,7 @@ if __name__ == "__main__":
 
     if len(sys.argv) == 1:
 
-        HubServer().run()
+        HubServer(max_clients=1).run()
 
     elif sys.argv[1] == '-d':
 
