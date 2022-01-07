@@ -45,6 +45,7 @@ logger = Logger(LOGFILE)
 
 PATH = '.'
 PORT = 57990
+WHITELIST = ('127.0.0.1', '138.68.191.187')
 
 try:
     with open('conf.json') as f:
@@ -175,7 +176,9 @@ class HubRequestHandler(socketserver.BaseRequestHandler):
                 "Max number of running Troop instances reached",
                 in_validation=True
             )
-        if self.client_address[0] in self.server.address_book():
+
+        ip = self.client_address[0]
+        if ip not in WHITELIST and ip in self.server.address_book():
             return self.error(
                 "A running Troop server has already been started from "
                 "this address",
@@ -466,7 +469,7 @@ if __name__ == "__main__":
 
     if len(sys.argv) == 1:
 
-        HubServer(max_clients=1).run()
+        HubServer(max_clients=10).run()
 
     elif sys.argv[1] == '-d':
 
