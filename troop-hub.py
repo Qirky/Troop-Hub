@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import socket, socketserver
+import ipaddress
 import time, datetime
 import json
 import os, os.path
@@ -45,18 +46,35 @@ logger = Logger(LOGFILE)
 
 PATH = '.'
 PORT = 57990
-WHITELIST = ('127.0.0.1', '138.68.191.187')
+WHITELIST = []
 
 try:
     with open('conf.json') as f:
         data = json.loads(f.read())
     PATH = data.get('path') or PATH
     PORT = data.get('port') or PORT
+    WHITELIST = data.get('whitelist') or WHITELIST
 except FileNotFoundError:
     pass
 
 def get_troop_executable():
     return os.path.join(PATH, 'run-server.py')
+
+class Whitelist:
+    def __init__(self, addresses):
+        local = ['127.0.0.1']
+        self.networks = [
+            ipaddress.IPv4Network(addr) for addr in local + list(addresses)
+        ]
+
+    def __contains__(self, address):
+        address = ipaddress.IPv4Address(address)
+        for network in self.networks:
+            if address in network:
+                return True
+        return False
+
+WHITELIST = Whitelist(WHITELIST)
 
 class JSONMessage:
     """ Wrapper for JSON messages sent to the server """
@@ -89,6 +107,8 @@ class HubRequestHandler(socketserver.BaseRequestHandler):
         self.server  = HubServer
         self.client_address = (address, port)
         """
+        self.daemonized = False
+
         # Get type of request
         request = self.recv()
         if 'type' not in request:
@@ -114,7 +134,7 @@ class HubRequestHandler(socketserver.BaseRequestHandler):
         if 'name' not in data:
             return self.error('No instance name given', in_validation=True)
 
-        elif self.client_address[0] not in ('127.0.0.1', 'localhost'):
+        elif self.client_address[0] not in WHITELIST:
             return self.error(
                 'External kill request denied', in_validation=True
             )
@@ -154,16 +174,33 @@ class HubRequestHandler(socketserver.BaseRequestHandler):
         self.send({'address': self.public_address})
         self.println("New session started")
 
-        self.alive = True
-
-        while True:
-            data = self.recv()
-            if not self.alive:
-                return
-            if not data:
-                return self.kill()
+        # Don't poll client if daemonized
+        self.daemonized = data.get('daemon')
+        if not self.daemonized:
+            self.alive = True
+            while True:
+                data = self.recv()
+                if not self.alive:
+                    return
+                if not data:
+                    return self.kill()
 
         return
+
+    def handle_list(self, request):
+        """
+        Returns a JSON string with information about the existing server
+        instances. Request must come from a whitelisted IP.
+        """
+        if self.client_address[0] not in WHITELIST:
+            return self.error(
+                'Status request made from invalid address {}'.format(
+                    self.client_address[0]
+                ),
+                in_validation=True
+            )
+
+        return self.send({'data': self.server.server_list()})
 
     def validate_request(self, request):
         """ Checks whether to continue handling the request """
@@ -194,7 +231,8 @@ class HubRequestHandler(socketserver.BaseRequestHandler):
         '''
         Sends an error to the client and kills the process if post-validation
         '''
-        self.send({'error': message})
+        if not self.daemonized:
+            self.send({'error': message})
         if not in_validation:
             return self.kill()
 
@@ -334,6 +372,12 @@ class HubServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
     def server_names(self):
         return (server.name for server in self._clients.values())
+
+    def server_list(self):
+        return [{
+            'name': server.name,
+            'id': server.id
+        } for server in self._clients.values()]
 
     def add_client(self, client):
         self._clients[client.name] = client
